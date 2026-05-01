@@ -26,3 +26,4 @@ Use this skill when a change can break notebook state convergence, output render
 
 - Read [references/crdt-ownership.md](references/crdt-ownership.md) before changing mutation paths.
 - Read [references/output-and-protocol.md](references/output-and-protocol.md) before changing frame handling, blob resolution, or MIME classification.
+- Read [references/sync-task-resilience.md](references/sync-task-resilience.md) before changing the sync task loop, adding catch_unwind guards, or working with automerge sync recovery.
