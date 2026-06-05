@@ -216,10 +216,25 @@ formatting over the nested checkout). Removed it. Future fork operations should 
     `state_kick_tx`. This mirrors the deliberate "kernel stays running" policy the framing-
     error branch already applies (lifecycle-analysis: that branch is the correct model).
 
+23. **The recoverable clean-EOF arm enforces a 1s reconnect floor
+    (`CLEAN_EOF_RECONNECT_FLOOR`).** From an adversarial review of 3a: `reconnect_with_backoff`
+    only sleeps between *failed* connects, so a cloud sink that accepts the connection and then
+    immediately closes cleanly every cycle (a flapping/evicting room) would spin a reconnect
+    storm at network-RTT rate (not a CPU busy-loop, but a self-inflicted DoS on the room). The
+    `Some(Err)` arm has the same structural property, but clean-EOF-on-every-reconnect is a
+    *more plausible* trigger for a cloud room than instant framing errors. The fix: track the
+    last clean-EOF reconnect time and, if a clean EOF recurs within the floor, sleep the
+    remainder before redialing. Only the recoverable (cloud) path uses it; the UDS path never
+    reconnects on clean EOF, so its `last_clean_reconnect` stays `None`. The room-side watchdog
+    (3d) and a fuller circuit-breaker remain future work, but this client-side floor is the
+    prerequisite the review flagged for the 3c spawn path.
+
 Phase 3a verification: `cargo test -p runtimed` → 944 passed, 0 failed (UDS default
 unchanged); `cargo test -p notebook-protocol` → 89 passed; `cargo test -p
 notebook-cloud-transport` → 12 passed; clippy clean across all three; `cargo fmt --check`
-clean. The `tokio_mutex_lint` + `tokio_select_cancel_safe` CI lints still pass.
+clean. The `tokio_mutex_lint` + `tokio_select_cancel_safe` CI lints still pass. Adversarial
+subagent review of the EOF-policy change found no BLOCKERs; its one concern (reconnect-storm
+on a flapping sink) is addressed by decision #23.
 
 ## Phase 3 remaining plan (3b+) — for the takeback session
 

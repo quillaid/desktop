@@ -53,6 +53,14 @@ use crate::protocol::QueueEntry;
 mod echo_suppression;
 use echo_suppression::EchoSuppressor;
 
+/// Minimum interval between clean-EOF reconnect cycles on a recoverable
+/// transport. `reconnect_with_backoff` only delays between *failed* connects;
+/// this floor stops a sink that accepts a connection and then immediately
+/// closes cleanly (a flapping/evicting cloud room) from spinning a reconnect
+/// storm at network-RTT rate. Unused by the UDS transport (which tears down on
+/// clean EOF rather than reconnecting).
+const CLEAN_EOF_RECONNECT_FLOOR: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Shared context for the runtime agent (no kernel -- kernel is owned locally).
 struct RuntimeAgentContext {
     state: RuntimeStateHandle,
@@ -128,6 +136,11 @@ pub async fn run_runtime_agent(
     let mut kernel_state = KernelState::new(state.clone());
     let mut seen_execution_ids = HashSet::new();
     let mut echo_suppressor = EchoSuppressor::default();
+    // Timestamp of the last clean-EOF reconnect, used to enforce a floor
+    // between reconnect cycles on a recoverable (cloud) transport so a flapping
+    // sink can't drive a reconnect storm. Only set/read on that path; `None` on
+    // the UDS transport, which never reconnects on clean EOF.
+    let mut last_clean_reconnect: Option<tokio::time::Instant> = None;
     let mut lifecycle_rx: Option<mpsc::UnboundedReceiver<LifecycleSignal>> = None;
     let mut work_rx: Option<mpsc::Receiver<WorkCommand>> = None;
 
@@ -570,6 +583,19 @@ pub async fn run_runtime_agent(
                             info!("[runtime-agent] Daemon disconnected (EOF)");
                             break;
                         }
+                        // Floor between reconnect cycles. `reconnect_with_backoff`
+                        // only sleeps between *failed* connects; a sink that
+                        // accepts the connection and then immediately closes
+                        // cleanly every time (a flapping/evicting cloud room)
+                        // would otherwise spin a reconnect storm at network-RTT
+                        // rate. If the previous clean reconnect was very recent,
+                        // wait out the floor before redialing.
+                        if let Some(last) = last_clean_reconnect {
+                            let since = last.elapsed();
+                            if since < CLEAN_EOF_RECONNECT_FLOOR {
+                                tokio::time::sleep(CLEAN_EOF_RECONNECT_FLOOR - since).await;
+                            }
+                        }
                         warn!(
                             "[runtime-agent] Sync sink closed cleanly — reconnecting \
                              (kernel stays running)"
@@ -581,6 +607,7 @@ pub async fn run_runtime_agent(
                                 frame_sink = new_sink;
                                 coordinator_sync_state = automerge::sync::State::new();
                                 let _ = state_kick_tx.send(());
+                                last_clean_reconnect = Some(tokio::time::Instant::now());
                                 info!("[runtime-agent] Reconnected after clean close");
                                 continue;
                             }
