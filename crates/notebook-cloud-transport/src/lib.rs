@@ -422,6 +422,13 @@ impl FrameTransport for CloudWsFrameTransport {
     type Source = CloudWsSource;
     type Sink = CloudWsSink;
 
+    /// A clean WS close must not tear the kernel down: the daemon still owns a
+    /// healthy kernel, and the close is an idle timeout / eviction / blip the
+    /// agent should recover from by reconnecting. See lifecycle requirement #1.
+    fn clean_eof_is_recoverable(&self) -> bool {
+        true
+    }
+
     async fn connect(&self) -> std::io::Result<(Self::Source, Self::Sink)> {
         let (source, sink, principal) = self.connect_cloud().await?;
         // Cache the principal for `Self::principal`. Reconnects to the same room
@@ -605,5 +612,20 @@ mod tests {
         });
         assert_eq!(t.ws_url(), "wss://preview.runt.run/n/abc/sync");
         assert!(t.principal().is_none());
+    }
+
+    /// A clean WS close must be recoverable (reconnect, keep the kernel alive),
+    /// the opposite of the UDS default — lifecycle requirement #1.
+    #[test]
+    fn cloud_clean_eof_is_recoverable() {
+        let t = CloudWsFrameTransport::new(CloudWsConfig {
+            cloud_url: "https://preview.runt.run".into(),
+            notebook_id: "abc".into(),
+            scope: "runtime_peer".into(),
+            auth: CloudAuth::OidcBearer {
+                token: "tok".into(),
+            },
+        });
+        assert!(t.clean_eof_is_recoverable());
     }
 }

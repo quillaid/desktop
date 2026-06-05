@@ -558,8 +558,40 @@ pub async fn run_runtime_agent(
                         }
                     }
                     None => {
-                        info!("[runtime-agent] Daemon disconnected (EOF)");
-                        break;
+                        // Clean EOF (peer half-closed). The teardown policy is
+                        // transport-specific. For the daemon socket a clean
+                        // close means the daemon is gone, so we tear the kernel
+                        // down (historical behavior). For a cloud-WS sink a
+                        // clean close is an idle timeout / eviction / blip and
+                        // must NOT kill a healthy daemon-managed kernel — we
+                        // reconnect and resync exactly like the framing-error
+                        // path above. (lifecycle-analysis req #1)
+                        if !transport.clean_eof_is_recoverable() {
+                            info!("[runtime-agent] Daemon disconnected (EOF)");
+                            break;
+                        }
+                        warn!(
+                            "[runtime-agent] Sync sink closed cleanly — reconnecting \
+                             (kernel stays running)"
+                        );
+                        drop(frame_source);
+                        match reconnect_with_backoff(&transport).await {
+                            Ok((new_source, new_sink)) => {
+                                frame_source = new_source;
+                                frame_sink = new_sink;
+                                coordinator_sync_state = automerge::sync::State::new();
+                                let _ = state_kick_tx.send(());
+                                info!("[runtime-agent] Reconnected after clean close");
+                                continue;
+                            }
+                            Err(reconnect_err) => {
+                                error!(
+                                    "[runtime-agent] Reconnect failed after retries: {}",
+                                    reconnect_err
+                                );
+                                break;
+                            }
+                        }
                     }
                 }
             }

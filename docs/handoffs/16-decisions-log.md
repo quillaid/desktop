@@ -187,3 +187,89 @@ Build-host note: `gh repo fork --clone` left a stray 139 MB `desktop/` clone ins
 worktree (the fork is named `quillaid/desktop`); it tripped `cargo xtask lint` (JS/TS
 formatting over the nested checkout). Removed it. Future fork operations should use
 `--clone=false` or clone outside the worktree.
+
+### Phase 3a session (2026-06-05, lab2, branch `quod/16-lifecycle`)
+
+21. **Phase 3 is split: 3a (transport-aware clean-EOF policy) lands now; 3b+ (spawn path,
+    WS reconnect/re-auth specifics, cloud-room watchdog, policy relaxation, inbound request
+    channel) are planned but not yet built.** Why: Phase 3 spans three codebases (Rust agent,
+    TS Cloudflare worker, `runtime-doc` policy) and its safety-critical pieces (the DO
+    watchdog, the policy relaxation) need integration/live verification that isn't fully
+    headless. But lifecycle-analysis **req #1** — "a cloud-WS clean EOF must NOT fall into
+    `kernel.shutdown()`" — is a clean, behavior-preserving, unit-testable Rust change and is
+    the keystone that makes spawning the agent on the cloud transport *safe*. Landing it
+    first de-risks 3b and keeps each PR independently reviewable.
+
+22. **The clean-EOF teardown policy is a defaulted trait method
+    `FrameTransport::clean_eof_is_recoverable()` (default `false`), overridden to `true` by
+    the cloud transport.** Alternative: a runtime flag threaded through `run_runtime_agent`,
+    or a per-call parameter. Why a defaulted trait method: the policy is an intrinsic property
+    of the transport (the daemon socket's clean close means "daemon gone → tear down"; a
+    cloud WS clean close means "blip/eviction → reconnect"), so it belongs on the transport.
+    Default `false` keeps the UDS/desktop path byte-for-byte unchanged (verified: 944
+    runtimed tests still green). The agent's `None` (clean-EOF) arm now consults it and, when
+    recoverable, runs the *same* reconnect+resync dance as the existing framing-error (`Err`)
+    arm — drop source, `reconnect_with_backoff`, reset `coordinator_sync_state`, kick
+    `state_kick_tx`. This mirrors the deliberate "kernel stays running" policy the framing-
+    error branch already applies (lifecycle-analysis: that branch is the correct model).
+
+Phase 3a verification: `cargo test -p runtimed` → 944 passed, 0 failed (UDS default
+unchanged); `cargo test -p notebook-protocol` → 89 passed; `cargo test -p
+notebook-cloud-transport` → 12 passed; clippy clean across all three; `cargo fmt --check`
+clean. The `tokio_mutex_lint` + `tokio_select_cancel_safe` CI lints still pass.
+
+## Phase 3 remaining plan (3b+) — for the takeback session
+
+Ordered by the lifecycle analysis. 3a (req #1) is **done**. Remaining, in dependency order:
+
+- **3b — WS reconnect/re-auth + full-resync on cloud reconnect (req #2).** `reconnect_with_backoff`
+  is already generic over `FrameTransport`, and the cloud `connect()` re-dials + re-auths +
+  re-reads `cloud_room_ready`, so the *mechanism* exists. What's missing is verifying the
+  resync kick (`state_kick_tx`) drives a full RuntimeStateDoc re-send after a cloud reconnect
+  (it fires today on both reconnect arms — confirm it converges against a real room), and
+  that re-auth uses a *fresh* token if the original expired (the `CloudAuth` is currently a
+  static token; a token-provider closure may be needed for long-lived sessions). Unit-test
+  the reconnect arm with a mock `FrameTransport` whose `connect` fails N times then succeeds.
+
+- **3c — daemon spawn path + doc-actor identity + consumer-side receive (the integration).**
+  Add a `run_runtime_agent`-equivalent (or a parameter) that builds a `CloudWsFrameTransport`
+  instead of `UdsFrameTransport`. Two agent-loop changes gated on this path:
+  (a) author the RuntimeStateDoc (and NotebookDoc if synced) under the
+  `cloud_room_ready` principal (`transport.principal()`), as `<principal>/<operator>`, not the
+  daemon's `runtime_agent_id` — else the room's `validate_room_notebook_change_actors` drops
+  every change (decision #6, ADR "load-bearing findings"). (b) Apply incoming RuntimeStateSync
+  with `receive_sync_message_with_changes` (consumer semantics) rather than the daemon's
+  `receive_sync_and_foreign_comms_recovering` (which strips incoming changes). Gate (a)/(b) on
+  a transport-kind discriminant so the UDS path is untouched. **This is where the live
+  cross-machine re-proof runs** (`/tmp/stage-oidc.txt` present on lab2): spawn the daemon's
+  real `runtime_agent` against a preview room as `runtime_peer` (needs the explicit
+  `runtime_peer` ACL row, decision #9) and confirm a cloud-submitted cell runs on the
+  daemon-managed kernel and renders in the viewer — through the *real* agent, not the spike.
+
+- **3d — cloud-room DurableObject watchdog (reqs #3, #7; the safety net the daemon can't
+  provide).** TypeScript in `apps/notebook-cloud/`. Thread peer **scope** through
+  `removePeer` → `room-materializer.removePeer` → `RoomHostHandle.remove_peer`
+  (`notebook-room.ts:635`, `runtimed-wasm/src/lib.rs:523`), give `RoomHostHandle` a
+  reconciliation mutator (it has none), and use a DO `alarm()` with a grace period to
+  terminalize running/queued executions + flip lifecycle when a `runtime_peer` departs.
+  Verify with `cd apps/notebook-cloud && node --import tsx --test test/*.test.ts`.
+
+- **3e — policy relaxation (req #4; gates 3d being legal).** `crates/runtime-doc/src/policy.rs:403-405`
+  blocks editor/owner from writing `state.kernel` ("daemon-owned"). The watchdog (room host)
+  needs a *narrow* authority to terminalize lifecycle on `runtime_peer` departure. Recommended:
+  both (a) a scoped relaxation for the lifecycle→terminal transition, and (b) a model-level
+  `Disconnected` `RuntimeLifecycle` / `last_seen` on `KernelState`
+  (`crates/runtime-doc/src/types.rs:272`) so viewers distinguish gone-but-recoverable from
+  dead. Unit-test the policy in `runtime-doc`.
+
+- **3f — inbound request channel (req #5) + terminal-delta buffering (req #6).** Route
+  interrupt/restart `RuntimeAgentRequest`s to the cloud agent (hosted REQUEST dispatch), and
+  don't `break` the agent loop on a single writer error (`runtime_agent.rs` outbound arm) —
+  buffer + replay across a blip. 3f's req #6 is partly addressed by 3a (the loop no longer
+  tears down on a clean close) but the writer-error `break` in the `state_changed_rx` arm
+  remains.
+
+Branch/PR chain so far (all stacked, all in fork `quillaid/desktop` except #3409):
+`main` → `quod/runtime-agent-transport-handoff` (docs) → `quod/16-frame-transport` (Phase 1,
+**nteract/nteract#3409**) → `quod/16-cloud-transport` (Phase 2, **quillaid/desktop#1**) →
+`quod/16-lifecycle` (Phase 3a, PR pending).

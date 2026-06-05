@@ -82,6 +82,24 @@ pub trait FrameTransport: Send + Sync {
     fn connect(
         &self,
     ) -> impl std::future::Future<Output = std::io::Result<(Self::Source, Self::Sink)>> + Send;
+
+    /// Whether a *clean* end-of-stream (`recv_frame` → `None`, not an error)
+    /// should be treated as recoverable — i.e. reconnect and keep the kernel
+    /// alive — rather than as a terminal disconnect that tears the kernel down.
+    ///
+    /// Default `false`: a clean EOF means the peer deliberately half-closed the
+    /// stream. For the daemon socket that means the daemon is gone, and the
+    /// runtime agent should shut its kernel down — the historical behavior.
+    ///
+    /// A cloud-WebSocket transport overrides this to `true`: a clean WS close
+    /// (idle timeout, server eviction, a network blip surfaced as a normal
+    /// close) must NOT kill a healthy daemon-managed kernel. Instead the agent
+    /// reconnects and resyncs, mirroring the framing-error recovery path. This
+    /// is lifecycle requirement #1 in `docs/handoffs/16-lifecycle-analysis.md`:
+    /// the default clean-EOF teardown is actively wrong for a cloud sink.
+    fn clean_eof_is_recoverable(&self) -> bool {
+        false
+    }
 }
 
 // -- UDS implementation -----------------------------------------------------
@@ -258,5 +276,20 @@ mod tests {
         assert_eq!(f2.payload, b"second");
 
         assert!(source.recv_frame().await.is_none(), "clean EOF -> None");
+    }
+
+    /// The UDS transport keeps the historical clean-EOF teardown policy: a
+    /// clean daemon-socket close tears the kernel down (the agent breaks its
+    /// loop). Cloud transports override this; the default must stay `false` so
+    /// desktop behavior is unchanged.
+    #[test]
+    fn uds_clean_eof_is_not_recoverable_by_default() {
+        let transport = UdsFrameTransport::new(
+            "/tmp/does-not-need-to-exist.sock",
+            "nb",
+            "runtime-agent:test",
+            "/tmp/blobs",
+        );
+        assert!(!transport.clean_eof_is_recoverable());
     }
 }
