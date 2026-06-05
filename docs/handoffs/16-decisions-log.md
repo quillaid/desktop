@@ -121,3 +121,69 @@ are **not** installed here — used a spawned subagent for adversarial review in
     to `origin` and retarget the PRs; optimize for the reviewable trail, not remote
     identity. Stack Phase 2 on `quod/16-frame-transport` and PR it against this same branch
     or #3409's head.
+
+### Phase 2 session (2026-06-05, lab2, branch `quod/16-cloud-transport`)
+
+16. **`runt-cloud-peer` already exists on `main` (merged #3397) as the WS-sync *binary*,
+    without kernel hosting.** The spike branch `quod/runtime-peer-kernel-host` (#3408) added
+    `--host-kernel` + `kernel_host.rs` on top of it; that half stays retired per decision #1.
+    Phase 2 lifts the merged binary's WS wire (dial + header auth + `cloud_room_ready` +
+    one-frame-per-binary-message) into a **library**, `notebook-cloud-transport`, that
+    implements the Phase 1 `FrameTransport` trait. The binary keeps working unchanged; the
+    library is what the daemon's `runtime_agent` will write to.
+
+17. **Phase 2 ships the cloud transport *library only*; the daemon spawn-path wiring moves
+    to Phase 3.** Alternative (handoff's literal Phase 2): also add "a daemon path to spawn
+    `runtime_agent` with the cloud transport." Why deferred: wiring the spawn path requires
+    two agent-loop changes that are unsafe before Phase 3's fixes — (a) authoring the
+    NotebookDoc/RuntimeStateDoc under the `cloud_room_ready` principal (not the daemon's
+    `runtime_agent_id`), and (b) the consumer-side `receive_sync_message_with_changes`
+    (decision #6) instead of the daemon's `receive_sync_and_foreign_comms_recovering`. Most
+    critically, the handoff itself flags that a cloud-WS EOF currently falls into
+    `kernel.shutdown()` (lifecycle-analysis req #1), so spawning the agent on the cloud
+    transport *before* the EOF-policy-by-transport split would let a transient WS blip kill a
+    healthy kernel. Shipping the transport alone keeps each PR independently safe and
+    reviewable; Phase 3 adds the spawn path together with the EOF fix that makes it correct.
+    A compile-time assertion (`cloud_transport_is_a_frame_transport`) proves the library is
+    already drop-in for the agent's generic bound, so Phase 3 is purely additive.
+
+18. **The cloud `connect()` reads up to `cloud_room_ready` and surfaces the room principal
+    via an `OnceLock` getter, rather than widening the `FrameTransport` trait.** Alternative:
+    add a `principal()`/`on_ready()` method to the trait. Why: the UDS transport has no such
+    concept, and the Phase 1 trait PR (#3409) is open for review — widening it now would
+    churn that PR. The principal is cloud-specific, so it lives on the concrete
+    `CloudWsFrameTransport`. Data frames that arrive before `cloud_room_ready` are buffered in
+    the source's `pending` queue and drained first, so the ready-wait loses no frames.
+
+19. **Frame decode skips empty/unknown frame types (returns `None`, keeps reading) to mirror
+    the UDS `FramedReader`/`recv_typed_frame` forward-compat behavior.** Why: a cloud room on
+    a newer protocol may send frame types this peer doesn't know; dropping them silently (with
+    a warn) matches the local path rather than erroring the stream.
+
+20. **The connect-time ready-wait surfaces `cloud_frame_rejected` as a
+    `PermissionDenied` connect error, and warns on a principal mismatch across reconnect.**
+    These came from an adversarial review of the Phase 2 crate. The original loop silently
+    ignored every non-`cloud_room_ready` control frame, so a room rejection delivered as a
+    `cloud_frame_rejected` control frame (auth/ACL failure surfaced *after* a successful WS
+    upgrade) would hang the connect until the socket closed, then return an opaque EOF —
+    discarding the room's stated `reason`. The reference binary at least logs it. Now
+    `classify_ready_control` returns `Ready(principal)` / `Rejected(reason)` / `Other`, and
+    `connect_cloud` returns `Err(PermissionDenied: "room rejected attach before ready:
+    <reason>")` on a rejection. Separately, the `OnceLock` principal cache now warns if a
+    reconnect observes a *different* principal than the one the agent is authoring under
+    (silent staleness would otherwise make the room drop all the agent's changes — the exact
+    failure mode the module docs warn about). Pre-ready data frames are still buffered (not
+    dropped like the reference) — judged strictly safer.
+
+Phase 2 verification: `cargo test -p notebook-cloud-transport` → 11 passed, 0 failed;
+`cargo clippy -p notebook-cloud-transport --all-targets` clean; `cargo test -p runtimed`
+still 944 passed (no regression from the new workspace member). Adversarial subagent review
+ran against the crate vs the `runt-cloud-peer` reference; its one BLOCKER (silent rejection
+handling) is fixed per decision #20. Live cross-machine re-proof (`/tmp/stage-oidc.txt`
+present on lab2) is deferred with the Phase 3 spawn path — there is no daemon path to
+*invoke* the cloud transport yet, by decision #17.
+
+Build-host note: `gh repo fork --clone` left a stray 139 MB `desktop/` clone inside the
+worktree (the fork is named `quillaid/desktop`); it tripped `cargo xtask lint` (JS/TS
+formatting over the nested checkout). Removed it. Future fork operations should use
+`--clone=false` or clone outside the worktree.
