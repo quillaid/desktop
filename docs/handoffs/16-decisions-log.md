@@ -102,9 +102,12 @@ runtimed --all-targets` and `-p notebook-protocol --all-targets` clean; `cargo b
 --workspace` clean; `cargo fmt --check` clean. Net diff: +48/-97 in runtime_agent +
 new transport.rs. Adversarial subagent review found zero behavioral differences.
 
-Note for Phase 2: `/tmp/stage-oidc.txt` **is present on lab2**, so the live cross-machine
-re-proof is runnable from this host once the cloud transport lands. `pi`/`opencode` CLIs
-are **not** installed here — used a spawned subagent for adversarial review instead.
+Note for Phase 2: `/tmp/stage-oidc.txt` is **NOT present on lab2** (an earlier note in this
+log claimed it was — that was a false positive from a shell check where `head` exits 0 on
+empty stdin; corrected). So the live cross-machine re-proof is **not** runnable from this
+host without creds being provided. preview.runt.run is reachable (HTTP 200), so only the
+staging bearer is missing. `pi`/`opencode` CLIs are **not** installed here either — used a
+spawned subagent for adversarial review instead.
 
 15. **Push to fork `quillaid/desktop` and open the PR against the `nteract/nteract`
     handoff branch from there.** Alternative: push the branch directly to `origin`
@@ -179,9 +182,9 @@ Phase 2 verification: `cargo test -p notebook-cloud-transport` → 11 passed, 0 
 `cargo clippy -p notebook-cloud-transport --all-targets` clean; `cargo test -p runtimed`
 still 944 passed (no regression from the new workspace member). Adversarial subagent review
 ran against the crate vs the `runt-cloud-peer` reference; its one BLOCKER (silent rejection
-handling) is fixed per decision #20. Live cross-machine re-proof (`/tmp/stage-oidc.txt`
-present on lab2) is deferred with the Phase 3 spawn path — there is no daemon path to
-*invoke* the cloud transport yet, by decision #17.
+handling) is fixed per decision #20. Live cross-machine re-proof is deferred with the Phase 3
+spawn path — there is no daemon path to *invoke* the cloud transport yet (decision #17), and
+the staging bearer (`/tmp/stage-oidc.txt`) is **not** present on this host regardless.
 
 Build-host note: `gh repo fork --clone` left a stray 139 MB `desktop/` clone inside the
 worktree (the fork is named `quillaid/desktop`); it tripped `cargo xtask lint` (JS/TS
@@ -241,10 +244,13 @@ Ordered by the lifecycle analysis. 3a (req #1) is **done**. Remaining, in depend
   with `receive_sync_message_with_changes` (consumer semantics) rather than the daemon's
   `receive_sync_and_foreign_comms_recovering` (which strips incoming changes). Gate (a)/(b) on
   a transport-kind discriminant so the UDS path is untouched. **This is where the live
-  cross-machine re-proof runs** (`/tmp/stage-oidc.txt` present on lab2): spawn the daemon's
-  real `runtime_agent` against a preview room as `runtime_peer` (needs the explicit
+  cross-machine re-proof runs** (requires a staging bearer — see creds gate below): spawn the
+  daemon's real `runtime_agent` against a preview room as `runtime_peer` (needs the explicit
   `runtime_peer` ACL row, decision #9) and confirm a cloud-submitted cell runs on the
   daemon-managed kernel and renders in the viewer — through the *real* agent, not the spike.
+  **Creds gate:** this needs a staging bearer at `/tmp/stage-oidc.txt`, which is **not**
+  present on lab2 as of the Phase 3a session — provide it (or run on a host that has it) to
+  do the live re-proof. preview.runt.run itself is reachable from lab2 (HTTP 200).
 
 - **3d — cloud-room DurableObject watchdog (reqs #3, #7; the safety net the daemon can't
   provide).** TypeScript in `apps/notebook-cloud/`. Thread peer **scope** through
