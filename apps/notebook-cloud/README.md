@@ -714,14 +714,16 @@ The workstation agent reads `NTERACT_API_KEY` from the environment and also
 loads `${PREVIEW_RUNT_ENV:-$HOME/preview.runt.run/.env}` when present. It
 registers and heartbeats the current machine through `POST /api/workstations`,
 polls `GET /api/workstations/:workstationId/attach-jobs`, and spawns
-`runtimed cloud-runtime-agent` for pending attach jobs. The API key is passed to
-the runtime peer through `RUNT_CLOUD_TOKEN`, not through argv; `runtimed`
-removes cloud/API-key environment variables again before launching the Python
-kernel. Run this helper inside tmux for preview/manual testing so the polling
-agent stays alive while the browser attaches workstations. After the agent
-registers, select it as the default workstation in the notebook UI or call
-`PATCH /api/workstations/default`, then use the Workstations rail in a private
-owner room to request attachment.
+`runtimed cloud-runtime-agent` for pending attach jobs. API-key auth is the
+default (`NOTEBOOK_CLOUD_WORKSTATION_AUTH_KIND=anaconda-key`); set
+`NOTEBOOK_CLOUD_WORKSTATION_AUTH_KIND=oidc` when `NTERACT_API_KEY` carries a
+short-lived OIDC bearer token. The credential is passed to the runtime peer
+through `RUNT_CLOUD_TOKEN`, not through argv; `runtimed` removes cloud
+environment variables again before launching the Python kernel. Run this helper
+inside tmux for preview/manual testing so the polling agent stays alive while
+the browser attaches workstations. After the agent registers, select it as the
+default workstation in the notebook UI or call `PATCH /api/workstations/default`,
+then use the Workstations rail in a private owner room to request attachment.
 
 With the workstation agent already running, use the toolbar smoke to exercise
 the hosted browser path end to end. It verifies the registered workstation is
